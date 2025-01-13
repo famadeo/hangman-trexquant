@@ -11,8 +11,8 @@ import os
 import torch.nn as nn
 from tqdm import tqdm
 
-from .models import RNN
-from .dataloader import WordDataLoader as dataloader
+from deeplearning.models import RNN
+from deeplearning.dataloader import WordDataLoader as dataloader
 
 
 #class responsible for training, testing and inference
