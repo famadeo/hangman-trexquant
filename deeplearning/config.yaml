@@ -31,3 +31,10 @@ dropout: 0.3 #dropout
 batch_size: 2048 #batch size for training and testing
 epochs: 200 #total no. of epochs to train
 num_workers: 64
+
+attention:
+  enable: true
+  num_heads: 8
+  diffusion_kernel: 'gaussian'
+  diffusion_sigma: 1.0
+  dropout: 0.1

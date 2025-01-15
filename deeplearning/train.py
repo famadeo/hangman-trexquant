@@ -1,358 +1,212 @@
-"""
-The main driver file responsible for training, testing and predicting
-"""
-
-import torch
-import yaml
-import matplotlib.pyplot as plt
-import numpy as np
 import os
-
-import torch.nn as nn
+import yaml
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
-
-from deeplearning.models import RNN
-from deeplearning.dataloader import WordDataLoader as dataloader
-
-
-#class responsible for training, testing and inference
-class dl_model():
-
-	def __init__(self, mode):
-
-		# Read config fielewhich contains parameters
-		with open("./deeplearning/config.yaml", 'r') as stream:
-			try:
-				self.config = yaml.safe_load(stream)
-			except yaml.YAMLError as exc:
-				print(exc)
-		self.mode = mode
-
-		# Architecture name decides prefix for storing models and plots
-		feature_dim = self.config['vocab_size']
-		self.arch_name = '_'.join(
-			[self.config['rnn'], str(self.config['num_layers']), str(self.config['hidden_dim']), str(feature_dim)])
-
-		print("Architecture:", self.arch_name)
-		# Change paths for storing models
-		self.config['models'] = os.path.join(self.config['models'], self.arch_name)
-		self.config['plots'] = os.path.join(self.config['plots'], self.arch_name)
-
-		# Make folders if DNE
-		if not os.path.exists(self.config['models']):
-			os.mkdir(self.config['models'])
-		if not os.path.exists(self.config['plots']):
-			os.mkdir(self.config['plots'])
-		if not os.path.exists(self.config['pickle']):
-			os.mkdir(self.config['pickle'])
-
-		self.cuda = (self.config['cuda'] and torch.cuda.is_available())
-
-		# load/initialise metrics to be stored and load model
-		if mode == 'train' or mode == 'test':
-
-			self.plots_dir = self.config['plots']
-			# store hyperparameters
-			self.total_epochs = self.config['epochs']
-			self.test_every = self.config['test_every_epoch']
-			self.test_per = self.config['test_per_epoch']
-			self.print_per = self.config['print_per_epoch']
-			self.save_every = self.config['save_every']
-			self.plot_every = self.config['plot_every']
-
-			# dataloader which returns batches of data
-			self.train_loader = dataloader('train', self.config)
-			self.test_loader = dataloader('test', self.config)
-			#declare model
-			self.model = RNN(self.config)
-
-			self.start_epoch = 1
-			self.edit_dist = []
-			self.train_losses, self.test_losses = [], []
-
-		else:
-
-			self.model = RNN(self.config)
-
-		if self.cuda:
-			self.model.cuda()
-
-		# resume training from some stored model
-		if self.mode == 'train' and self.config['resume']:
-			self.start_epoch, self.train_losses, self.test_losses = self.model.load_model(mode, self.model.rnn_name, self.model.num_layers, self.model.hidden_dim)
-			self.start_epoch += 1
-
-		# load best model for testing/inference
-		elif self.mode == 'test' or mode == 'test_one':
-			self.model.load_model(mode, self.config['rnn'], self.model.num_layers, self.model.hidden_dim, epoch=None)
-
-		#whether using embeddings
-		if self.config['use_embedding']:
-			self.use_embedding = True
-		else:
-			self.use_embedding = False
-
-	# Train the model
-	def train(self):
-
-		self.model.train()
-
-		# when to print losses during the epoch
-		print_range = list(np.linspace(0, len(self.train_loader), self.print_per + 2, dtype=np.uint32)[1:-1])
-		if self.test_per == 0:
-			test_range = []
-		else:
-			test_range = list(np.linspace(0, len(self.train_loader), self.test_per + 2, dtype=np.uint32)[1:-1])
-
-		for epoch in range(self.start_epoch, self.total_epochs + 1):
-
-			epoch_loss = 0.0
-			# i used for monitoring batch and printing loss, etc.
-			pbar = tqdm(total=len(self.train_loader), desc='Epoch [%i/%i]' % (epoch, self.total_epochs), ncols=100)
-
-			for i, (inputs, labels, miss_chars, input_lens) in enumerate(self.train_loader):
-				if self.use_embedding:
-					inputs = torch.from_numpy(inputs).long() #embeddings should be of dtype long
-				else:
-					inputs = torch.from_numpy(inputs).float()
-
-				#convert to torch tensors
-				labels = torch.from_numpy(labels).float()
-				miss_chars = torch.from_numpy(miss_chars).float()
-				input_lens = torch.from_numpy(input_lens).long()
-
-				if self.cuda:
-					inputs = inputs.cuda()
-					labels = labels.cuda()
-					miss_chars = miss_chars.cuda()
-					input_lens = input_lens.cuda()
-
-				# zero the parameter gradients
-				self.model.optimizer.zero_grad()
-				# forward + backward + optimize
-				outputs = self.model(inputs, input_lens, miss_chars)
-				loss, miss_penalty = self.model.calculate_loss(outputs, labels, input_lens, miss_chars, self.cuda)
-				loss.backward()
-
-				# clip gradient
-				# torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['grad_clip'])
-				self.model.optimizer.step()
-
-				# store loss
-				epoch_loss += loss.item()
-
-				# # print loss
-				# if i in print_range and epoch == 1:
-				# 	print('After %i batches, Current Loss = %.7f' % (i, epoch_loss / i))
-				# elif i in print_range and epoch > 1:
-				# 	print('After %i batches, Current Loss = %.7f, Avg. Loss = %.7f, Miss Loss = %.7f' % (
-				# 			i, epoch_loss / i, np.mean(np.array([x[0] for x in self.train_losses])), miss_penalty))
-
-				# update loss
-				if i in print_range and epoch == 1:
-					pbar.set_description('Epoch [%i/%i], Loss=%.4f' % (epoch, self.total_epochs, epoch_loss / i))
-				elif i in print_range and epoch > 1:
-					pbar.set_description('Epoch [%i/%i], Loss=%.4f, Avg.L=%.4f, MissL=%.4f' % (
-						epoch, self.total_epochs, epoch_loss / i, np.mean(np.array([x[0] for x in self.train_losses])), miss_penalty))
-				pbar.update()
-
-				# test model periodically
-				if i in test_range:
-					self.test(epoch)
-					self.model.train()
-
-			#refresh dataset i.e. generate a new dataset from corpurs
-			if epoch % self.config['reset_after'] == 0:
-				self.train_loader.update_dataset(epoch)
-
-			# #take the last example from the epoch and print the incomplete word, target characters and missed characters
-			# random_eg = min(np.random.randint(self.train_loader.batch_size), inputs.shape[0]-1)
-			# encoded_to_string(inputs.cpu().numpy()[random_eg], labels.cpu().numpy()[random_eg], miss_chars.cpu().numpy()[random_eg],
-			# 				  input_lens.cpu().numpy()[random_eg], self.train_loader.char_to_id, self.use_embedding)
-
-			# Store tuple of training loss and epoch number
-			self.train_losses.append((epoch_loss / len(self.train_loader), epoch))
-
-			# save model
-			if epoch % self.save_every == 0:
-				self.model.save_model(False, epoch, self.train_losses, self.test_losses,
-										self.model.rnn_name, self.model.num_layers, self.model.hidden_dim)
-
-			# test every 5 epochs in the beginning and then every fixed no of epochs specified in config file
-			# useful to see how loss stabilises in the beginning
-			if epoch % 5 == 0 and epoch < self.test_every:
-				self.test(epoch)
-				self.model.train()
-			elif epoch % self.test_every == 0:
-				self.test(epoch)
-				self.model.train()
-			# plot loss and accuracy
-			if epoch % self.plot_every == 0:
-				self.plot_loss_acc(epoch)
-
-			# except KeyboardInterrupt:
-			# 	#save model before exiting
-			# 	print("Saving model before quitting")
-			# 	self.model.save_model(False, epoch-1, self.train_losses, self.test_losses,
-			# 						  self.model.rnn_name, self.model.num_layers, self.model.hidden_dim)
-			# 	exit(0)
-
-	# test model
-	def test(self, epoch=None):
-
-		self.model.eval()
-
-		test_loss = 0
-
-		#generate a new dataset form corpus
-		# self.test_loader.refresh_data(epoch)
-
-		with torch.no_grad():
-
-			for inputs, labels, miss_chars, input_lens in tqdm(self.test_loader, desc='Testing', ncols=100):
-				
-				if self.use_embedding:
-					inputs = torch.from_numpy(inputs).long()
-				else:
-					inputs = torch.from_numpy(inputs).float()
-
-				labels = torch.from_numpy(labels).float()
-				miss_chars = torch.from_numpy(miss_chars).float()
-				input_lens= torch.from_numpy(input_lens).long()
-
-				if self.cuda:
-					inputs = inputs.cuda()
-					labels = labels.cuda()
-					miss_chars = miss_chars.cuda()
-					input_lens = input_lens.cuda()
-
-				# zero the parameter gradients
-				self.model.optimizer.zero_grad()
-				# forward + backward + optimize
-				outputs = self.model(inputs, input_lens, miss_chars)
-				loss, miss_penalty = self.model.calculate_loss(outputs, labels, input_lens, miss_chars, self.cuda)
-				test_loss += loss.item()
-
-		#take a random example from the epoch and print the incomplete word, target characters and missed characters
-		#min since the last batch may not be of length batch_size
-		# random_eg = min(np.random.randint(self.train_loader.batch_size), inputs.shape[0]-1)
-		# encoded_to_string(inputs.cpu().numpy()[random_eg], labels.cpu().numpy()[random_eg], miss_chars.cpu().numpy()[random_eg],
-		# 	input_lens.cpu().numpy()[random_eg], self.train_loader.char_to_id, self.use_embedding)
-
-		# Average out the losses and edit distance
-		test_loss /= len(self.test_loader)
-
-		print("Test Loss: %.7f, Miss Penalty: %.7f" % (test_loss, miss_penalty))
-
-		# Store in lists for keeping track of model performance
-		self.test_losses.append((test_loss, epoch))
-
-		# if testing loss is minimum, store it as the 'best.pth' model, which is used during inference
-		# store only when doing train/test together i.e. mode is train
-		if test_loss == min([x[0] for x in self.test_losses]) and self.mode == 'train':
-			print("Best new model found!")
-			self.model.save_model(True, epoch, self.train_losses, self.test_losses,
-								  self.model.rnn_name, self.model.num_layers, self.model.hidden_dim)
-
-		return test_loss
-
-	def predict(self, string, misses):
-		"""
-		called during inference
-		:param string: word with predicted characters and blanks at remaining places
-		:param misses: list of characters which were predicted but game feedback indicated that they are not present
-		:param char_to_id: mapping from characters to id
-		"""
-		# a -> 0
-		char_to_id = {chr(97+x): x for x in range(26)}
-		#  "BLANK": 26
-		char_to_id['.'] = len(char_to_id)
-
-		id_to_char = {v:k for k,v in char_to_id.items()}
-
-		#convert string into desired input tensor
-		if self.use_embedding:
-			encoded = np.zeros((len(string)))
-			for i, c in enumerate(string):
-				if c == '.':
-					encoded[i] = len(id_to_char) - 1 
-				else:
-					encoded[i] = char_to_id[c]
-
-			inputs = np.array(encoded)[None, :]
-			inputs = torch.from_numpy(inputs).long()
-
-		else:
-
-			encoded = np.zeros((len(string), len(char_to_id)))
-			for i, c in enumerate(string):
-				if c == '.':
-					encoded[i][len(id_to_char) - 1] = 1
-				else:
-					encoded[i][char_to_id[c]] = 1
-
-			inputs = np.array(encoded)[None, :, :]
-			inputs = torch.from_numpy(inputs).float()
-
-		#encode the missed characters
-		miss_encoded = np.zeros((len(char_to_id) - 1))
-		for c in misses:
-			miss_encoded[char_to_id[c]] = 1
-		miss_encoded = np.array(miss_encoded)[None, :]
-		miss_encoded = torch.from_numpy(miss_encoded).float()
-
-		input_lens = np.array([len(string)])
-		input_lens= torch.from_numpy(input_lens).long()	
-
-		if self.cuda:
-			inputs = inputs.cuda()
-			miss_encoded = miss_encoded.cuda()
-			input_lens = input_lens.cuda()
-
-		#pass through model
-		output = self.model(inputs, input_lens, miss_encoded)
-		probs = nn.functional.softmax(output, dim=1)
-		output = output.detach().cpu().numpy()[0]
-		probs = probs.detach().cpu().numpy()[0]
-		# print("NN model output:", probs)
-
-		#sort predictions
-		sorted_predictions = np.argsort(output)[::-1]
-		
-		#we cannnot consider only the argmax since a missed character may also get assigned a high probability
-		#in case of a well-trained model, we shouldn't observe this
-		return [id_to_char[x] for x in sorted_predictions], probs
-
-	def plot_loss_acc(self, epoch):
-		"""
-		take train/test loss and test accuracy input and plot it over time
-		:param epoch: to track performance across epochs
-		"""
-
-		plt.clf()
-		fig, ax1 = plt.subplots()
-
-		ax1.set_xlabel('Epoch')
-		ax1.set_ylabel('Loss')
-		ax1.plot([x[1] for x in self.train_losses], [x[0] for x in self.train_losses], color='r', label='Train Loss')
-		ax1.plot([x[1] for x in self.test_losses], [x[0] for x in self.test_losses], color='b', label='Test Loss')
-		ax1.tick_params(axis='y')
-		ax1.legend(loc='upper left')
-
-		fig.tight_layout()  # otherwise the right y-label is slightly clipped
-		plt.grid(True)
-		plt.legend()
-		plt.title(self.arch_name)
-
-		filename = os.path.join(self.plots_dir, 'plot_' + self.arch_name + '_' + str(epoch) + '.png')
-		plt.savefig(filename)
-
-
-if __name__ == '__main__':
-
-	a = dl_model('train')
-	a.train()
-	# char_to_id = {chr(97+x): x+1 for x in range(26)}
-	# char_to_id['PAD'] = 0
-	# a = dl_model('test_one')
-	# print(a.predict("*oau", char_to_id))
+from deeplearning.models import AttentionDiffusionRNN
+from deeplearning.dataloader import WordDataLoader
+from IPython.display import clear_output
+
+# Set up notebook-wide settings
+%matplotlib inline
+plt.style.use('seaborn')
+
+class AttentionModelTrainer:
+    def __init__(self, config_path='./deeplearning/config.yaml'):
+        # Load configuration
+        with open(config_path, 'r') as stream:
+            self.config = yaml.safe_load(stream)
+            
+        # Set up CUDA
+        self.cuda = torch.cuda.is_available() and self.config['cuda']
+        if self.cuda:
+            torch.cuda.set_device(3)  # Using GPU 3 as in original code
+            print("Using CUDA device:", torch.cuda.get_device_name())
+        
+        # Set up model name and paths
+        self.setup_paths()
+        
+        # Initialize data loaders
+        self.train_loader = WordDataLoader('train', self.config)
+        self.val_loader = WordDataLoader('test', self.config)
+        
+        # Initialize model
+        self.model = AttentionDiffusionRNN(self.config)
+        if self.cuda:
+            self.model = self.model.cuda()
+            
+        # Training metrics
+        self.train_losses = []
+        self.val_losses = []
+        self.attention_metrics = []
+        
+    def setup_paths(self):
+        """Setup directory structure for model artifacts"""
+        self.model_name = f"{self.config['rnn']}_{self.config['num_layers']}_{self.config['hidden_dim']}"
+        
+        # Create necessary directories
+        for path in ['models', 'plots']:
+            full_path = os.path.join(self.config[path], self.model_name)
+            os.makedirs(full_path, exist_ok=True)
+            
+    def train_epoch(self, epoch):
+        """Train for one epoch"""
+        self.model.train()
+        epoch_loss = 0.0
+        attention_loss = 0.0
+        
+        pbar = tqdm(self.train_loader, desc=f'Epoch [{epoch}/{self.config["epochs"]}]')
+        
+        for batch_idx, (inputs, labels, miss_chars, input_lens) in enumerate(pbar):
+            # Prepare batch
+            if self.config['use_embedding']:
+                inputs = torch.from_numpy(inputs).long()
+            else:
+                inputs = torch.from_numpy(inputs).float()
+                
+            labels = torch.from_numpy(labels).float()
+            miss_chars = torch.from_numpy(miss_chars).float()
+            input_lens = torch.from_numpy(input_lens).long()
+            
+            if self.cuda:
+                inputs = inputs.cuda()
+                labels = labels.cuda()
+                miss_chars = miss_chars.cuda()
+                input_lens = input_lens.cuda()
+            
+            # Forward pass
+            self.model.optimizer.zero_grad()
+            outputs = self.model(inputs, input_lens, miss_chars)
+            loss, miss_penalty = self.model.calculate_loss(outputs, labels, input_lens, miss_chars, self.cuda)
+            
+            # Backward pass
+            loss.backward()
+            self.model.optimizer.step()
+            
+            # Update metrics
+            epoch_loss += loss.item()
+            attention_loss += miss_penalty.item() if isinstance(miss_penalty, torch.Tensor) else miss_penalty
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f'{epoch_loss/(batch_idx+1):.4f}',
+                'att_loss': f'{attention_loss/(batch_idx+1):.4f}'
+            })
+            
+        return epoch_loss / len(self.train_loader), attention_loss / len(self.train_loader)
+    
+    def validate(self, epoch):
+        """Validate the model"""
+        self.model.eval()
+        val_loss = 0.0
+        attention_loss = 0.0
+        
+        with torch.no_grad():
+            for inputs, labels, miss_chars, input_lens in tqdm(self.val_loader, desc='Validating'):
+                # Prepare batch
+                if self.config['use_embedding']:
+                    inputs = torch.from_numpy(inputs).long()
+                else:
+                    inputs = torch.from_numpy(inputs).float()
+                    
+                labels = torch.from_numpy(labels).float()
+                miss_chars = torch.from_numpy(miss_chars).float()
+                input_lens = torch.from_numpy(input_lens).long()
+                
+                if self.cuda:
+                    inputs = inputs.cuda()
+                    labels = labels.cuda()
+                    miss_chars = miss_chars.cuda()
+                    input_lens = input_lens.cuda()
+                
+                # Forward pass
+                outputs = self.model(inputs, input_lens, miss_chars)
+                loss, miss_penalty = self.model.calculate_loss(outputs, labels, input_lens, miss_chars, self.cuda)
+                
+                val_loss += loss.item()
+                attention_loss += miss_penalty.item() if isinstance(miss_penalty, torch.Tensor) else miss_penalty
+        
+        val_loss = val_loss / len(self.val_loader)
+        attention_loss = attention_loss / len(self.val_loader)
+        
+        print(f'\nValidation - Loss: {val_loss:.4f}, Attention Loss: {attention_loss:.4f}')
+        return val_loss, attention_loss
+    
+    def plot_metrics(self, save=True):
+        """Plot training metrics"""
+        plt.figure(figsize=(12, 4))
+        
+        # Plot losses
+        plt.subplot(1, 2, 1)
+        plt.plot(self.train_losses, label='Train Loss')
+        plt.plot(self.val_losses, label='Validation Loss')
+        plt.title('Training and Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        # Plot attention metrics
+        plt.subplot(1, 2, 2)
+        plt.plot(self.attention_metrics, label='Attention Loss')
+        plt.title('Attention Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        
+        if save:
+            plt.savefig(os.path.join(self.config['plots'], self.model_name, f'training_plot.png'))
+        plt.show()
+    
+    def train(self):
+        """Main training loop"""
+        best_val_loss = float('inf')
+        
+        for epoch in range(1, self.config['epochs'] + 1):
+            # Training
+            train_loss, train_att_loss = self.train_epoch(epoch)
+            self.train_losses.append(train_loss)
+            
+            # Validation
+            if epoch % self.config['test_every_epoch'] == 0:
+                val_loss, val_att_loss = self.validate(epoch)
+                self.val_losses.append(val_loss)
+                self.attention_metrics.append(val_att_loss)
+                
+                # Save best model
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    self.model.save_model(
+                        is_best=True,
+                        epoch=epoch,
+                        train_loss=train_loss,
+                        test_loss=val_loss,
+                        rnn_name=self.config['rnn'],
+                        layers=self.config['num_layers'],
+                        hidden_dim=self.config['hidden_dim']
+                    )
+                
+                # Plot metrics
+                if epoch % self.config['plot_every'] == 0:
+                    clear_output(wait=True)
+                    self.plot_metrics()
+            
+            # Save periodic checkpoint
+            if epoch % self.config['save_every'] == 0:
+                self.model.save_model(
+                    is_best=False,
+                    epoch=epoch,
+                    train_loss=train_loss,
+                    test_loss=val_loss if len(self.val_losses) > 0 else None,
+                    rnn_name=self.config['rnn'],
+                    layers=self.config['num_layers'],
+                    hidden_dim=self.config['hidden_dim']
+                )
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize trainer
+    trainer = AttentionModelTrainer()
+    
+    # Start training
+    trainer.train()

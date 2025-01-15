@@ -197,17 +197,23 @@ class WordDataset(Dataset):
 class WordDataLoader(DataLoader):
     def __init__(self, mode, config):
         self.dataset = WordDataset(mode, config)
-
-        collate_fn = lambda batch: WordDataLoader.collate_fn(batch, config['vocab_size'], config['use_embedding'])
-        super(WordDataLoader, self).__init__(self.dataset, batch_size=config['batch_size'], shuffle=True, num_workers=config['num_workers'], collate_fn=collate_fn)
+        self.vocab_size = config['vocab_size']
+        self.use_embedding = config['use_embedding']
+        
+        super(WordDataLoader, self).__init__(
+            dataset=self.dataset,
+            batch_size=config['batch_size'],
+            shuffle=True,
+            num_workers=config['num_workers'],
+            collate_fn=self.collate_fn
+        )
 
     def update_dataset(self, epoch):
         self.dataset.update_epoch(epoch)
     
-    @staticmethod
-    def collate_fn(batch, vocab_size, use_embedding):
+    def collate_fn(self, batch):
         lens = np.array([len(x[0]) for x in batch]) 
-        inputs = batchify_words([x[0] for x in batch], vocab_size, use_embedding)
+        inputs = batchify_words([x[0] for x in batch], self.vocab_size, self.use_embedding)
         labels = np.array([x[1] for x in batch])
         miss_chars = np.array([x[2] for x in batch])
         return inputs, labels, miss_chars, lens
